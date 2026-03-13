@@ -35,21 +35,56 @@ class HomePage extends StatefulWidget {
   State<HomePage> createState() => _HomePageState();
 }
 
-class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
+class _HomePageState extends State<HomePage>
+    with WidgetsBindingObserver, TickerProviderStateMixin {
   bool _bubbleActive = false;
   bool _hasOverlayPermission = false;
   bool _hasLocationPermission = false;
   int _overLimitAllowance = 5;
+
+  late AnimationController _coffeeController;
+  late Animation<double> _coffeeScale;
+  late Animation<double> _coffeeOpacity;
 
   @override
   void initState() {
     super.initState();
     WidgetsBinding.instance.addObserver(this);
     _checkPermissions();
+
+    _coffeeController = AnimationController(
+      vsync: this,
+      duration: const Duration(seconds: 3),
+    );
+
+    // Pulse scale: 1.0 -> 1.3 -> 1.0, repeating ~4 times over 3s
+    _coffeeScale = TweenSequence<double>([
+      TweenSequenceItem(tween: Tween(begin: 1.0, end: 1.3), weight: 1),
+      TweenSequenceItem(tween: Tween(begin: 1.3, end: 1.0), weight: 1),
+    ]).animate(CurvedAnimation(
+      parent: _coffeeController,
+      curve: Curves.easeInOut,
+    ));
+
+    // Fade opacity to pulse the color
+    _coffeeOpacity = TweenSequence<double>([
+      TweenSequenceItem(tween: Tween(begin: 1.0, end: 0.5), weight: 1),
+      TweenSequenceItem(tween: Tween(begin: 0.5, end: 1.0), weight: 1),
+    ]).animate(CurvedAnimation(
+      parent: _coffeeController,
+      curve: Curves.easeInOut,
+    ));
+
+    _coffeeController.repeat();
+    Future.delayed(const Duration(seconds: 3), () {
+      if (mounted) _coffeeController.stop();
+      if (mounted) _coffeeController.value = 0.0;
+    });
   }
 
   @override
   void dispose() {
+    _coffeeController.dispose();
     WidgetsBinding.instance.removeObserver(this);
     super.dispose();
   }
@@ -143,14 +178,6 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
                       ),
                 ),
                 const SizedBox(height: 8),
-                Text(
-                  _bubbleActive
-                      ? 'Bubble is active'
-                      : 'Launch the bubble to see speed limits',
-                  style: Theme.of(context).textTheme.bodyMedium?.copyWith(
-                        color: Colors.white54,
-                      ),
-                ),
                 const SizedBox(height: 48),
 
                 // Launch / stop bubble
@@ -169,6 +196,16 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
                           _bubbleActive ? Colors.red[700] : Colors.green[700],
                     ),
                   ),
+                ),
+                const SizedBox(height: 16),
+                Text(
+                  _bubbleActive
+                      ? 'Bubble is running. You can close this screen.'
+                      : 'Tap Launch Bubble to start.\nYou can close this screen after.',
+                  textAlign: TextAlign.center,
+                  style: Theme.of(context).textTheme.bodyMedium?.copyWith(
+                        color: Colors.white54,
+                      ),
                 ),
                 const SizedBox(height: 40),
 
@@ -240,14 +277,29 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
                 const Spacer(),
 
                 // Buy me a coffee
-                TextButton.icon(
-                  onPressed: () => launchUrl(
-                    Uri.parse('https://buymeacoffee.com/4dvu1r9nsh'),
-                    mode: LaunchMode.externalApplication,
+                AnimatedBuilder(
+                  animation: _coffeeController,
+                  builder: (context, child) {
+                    final scale = _coffeeController.isAnimating
+                        ? _coffeeScale.value
+                        : 1.0;
+                    final opacity = _coffeeController.isAnimating
+                        ? _coffeeOpacity.value
+                        : 1.0;
+                    return Transform.scale(
+                      scale: scale,
+                      child: Opacity(opacity: opacity, child: child),
+                    );
+                  },
+                  child: TextButton.icon(
+                    onPressed: () => launchUrl(
+                      Uri.parse('https://buymeacoffee.com/4dvu1r9nsh'),
+                      mode: LaunchMode.externalApplication,
+                    ),
+                    icon: const Icon(Icons.coffee, size: 18),
+                    label: const Text('Buy me a coffee'),
+                    style: TextButton.styleFrom(foregroundColor: Colors.amber),
                   ),
-                  icon: const Icon(Icons.coffee, size: 18),
-                  label: const Text('Buy me a coffee'),
-                  style: TextButton.styleFrom(foregroundColor: Colors.amber),
                 ),
                 const SizedBox(height: 16),
               ],
