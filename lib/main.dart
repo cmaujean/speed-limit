@@ -2,6 +2,7 @@ import 'dart:io';
 
 import 'package:flutter/material.dart';
 import 'package:geolocator/geolocator.dart';
+import 'package:url_launcher/url_launcher.dart';
 
 import 'services/overlay_service.dart';
 
@@ -119,8 +120,8 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
           child: Padding(
             padding: const EdgeInsets.symmetric(horizontal: 32),
             child: Column(
-              mainAxisAlignment: MainAxisAlignment.center,
               children: [
+                const Spacer(),
                 // App icon / title
                 Container(
                   width: 100,
@@ -235,6 +236,20 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
                     label: 'Location permission required',
                     onTap: _requestLocationPermission,
                   ),
+
+                const Spacer(),
+
+                // Buy me a coffee
+                TextButton.icon(
+                  onPressed: () => launchUrl(
+                    Uri.parse('https://buymeacoffee.com/4dvu1r9nsh'),
+                    mode: LaunchMode.externalApplication,
+                  ),
+                  icon: const Icon(Icons.coffee, size: 18),
+                  label: const Text('Buy me a coffee'),
+                  style: TextButton.styleFrom(foregroundColor: Colors.amber),
+                ),
+                const SizedBox(height: 16),
               ],
             ),
           ),

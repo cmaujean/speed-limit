@@ -46,3 +46,7 @@ flutter build apk --debug
 ```
 
 The APK will be at `build/app/outputs/flutter-apk/app-debug.apk`.
+
+## Support
+
+If you find this app useful, [buy me a coffee](https://buymeacoffee.com/4dvu1r9nsh).
