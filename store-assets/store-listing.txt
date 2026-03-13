@@ -1,0 +1,39 @@
+========================================
+GOOGLE PLAY STORE LISTING
+========================================
+
+APP NAME: Speed Limit
+
+SHORT DESCRIPTION (80 chars max):
+See the speed limit for any road as a floating overlay on your screen.
+
+FULL DESCRIPTION (4000 chars max):
+Speed Limit shows you the current speed limit as a small, draggable bubble that floats over any app on your screen.
+
+Tap "Launch Bubble" and a speed limit sign appears on your screen. It works over any app -- navigation, music, phone calls -- just like the Uber driver bubble. Drag it wherever you want. Tap it to come back to the app.
+
+HOW IT WORKS
+- Uses GPS to track your location in real time
+- Looks up the speed limit from OpenStreetMap road data
+- Pre-fetches all nearby roads so street changes are detected instantly
+- Uses your travel direction to pick the right road at intersections
+- Keeps working when your screen is locked or the app is closed
+
+SPEED ALERT
+Set an over-limit allowance (default: 5 mph). If you exceed the speed limit by more than that amount, the bubble flashes red to warn you.
+
+PRIVACY
+Your location is used only to look up speed limits. It is never stored, shared, or sent to any server other than the OpenStreetMap Overpass API for road data queries. No accounts, no tracking, no ads.
+
+OPEN SOURCE
+Speed Limit is free and open source. View the code on GitHub:
+https://github.com/cmaujean/speed-limit
+
+NOTE
+Speed limit data comes from OpenStreetMap. Coverage varies by area and depends on volunteer contributors. The app may not have data for every road.
+
+========================================
+CATEGORY: Maps & Navigation
+CONTENT RATING: Everyone
+TAGS: speed limit, speed alert, floating overlay, driving, navigation, speed camera, speed warning
+========================================
