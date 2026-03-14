@@ -22,6 +22,9 @@ class MainActivity : FlutterActivity() {
                 "checkOverlayPermission" -> {
                     result.success(Settings.canDrawOverlays(this))
                 }
+                "isOverlayRunning" -> {
+                    result.success(OverlayService.isRunning)
+                }
                 "requestOverlayPermission" -> {
                     if (!Settings.canDrawOverlays(this)) {
                         val intent = Intent(

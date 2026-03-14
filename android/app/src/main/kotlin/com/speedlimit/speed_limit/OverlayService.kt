@@ -38,6 +38,11 @@ import org.json.JSONArray
 
 class OverlayService : Service() {
 
+    companion object {
+        var isRunning: Boolean = false
+            private set
+    }
+
     private var windowManager: WindowManager? = null
     private var overlayView: ImageView? = null
     private var currentSpeedLimit: Int = 0
@@ -78,6 +83,7 @@ class OverlayService : Service() {
 
     override fun onCreate() {
         super.onCreate()
+        isRunning = true
         createNotificationChannel()
         startForeground(NOTIFICATION_ID, buildNotification())
         windowManager = getSystemService(WINDOW_SERVICE) as WindowManager
@@ -533,6 +539,7 @@ class OverlayService : Service() {
 
     override fun onDestroy() {
         super.onDestroy()
+        isRunning = false
         stopFlashing()
         stopStallDetection()
         stopLocationUpdates()

@@ -8,6 +8,11 @@ class OverlayService {
     return result ?? false;
   }
 
+  static Future<bool> isRunning() async {
+    final result = await _channel.invokeMethod<bool>('isOverlayRunning');
+    return result ?? false;
+  }
+
   static Future<void> requestPermission() async {
     await _channel.invokeMethod('requestOverlayPermission');
   }

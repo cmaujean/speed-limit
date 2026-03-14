@@ -99,12 +99,14 @@ class _HomePageState extends State<HomePage>
   Future<void> _checkPermissions() async {
     if (!Platform.isAndroid) return;
     final overlay = await OverlayService.checkPermission();
+    final running = await OverlayService.isRunning();
     final locPerm = await Geolocator.checkPermission();
     final locOk = locPerm == LocationPermission.always ||
         locPerm == LocationPermission.whileInUse;
     setState(() {
       _hasOverlayPermission = overlay;
       _hasLocationPermission = locOk;
+      _bubbleActive = running;
     });
   }
 
