@@ -24,7 +24,7 @@
 <body>
 
 <h1>Speed Limit</h1>
-<p class="updated">Privacy Policy &mdash; Last updated: March 13, 2026</p>
+<p class="updated">Privacy Policy (Last updated: October 21, 2026)</p>
 
 <h2>Overview</h2>
 <p>Speed Limit ("the App") displays the current speed limit as a floating overlay on your Android device. This privacy policy explains what data the App accesses and how it is used.</p>
@@ -37,8 +37,8 @@
     <li>Location data is sent only to the <a href="https://overpass-api.de/">OpenStreetMap Overpass API</a> in the form of anonymous latitude/longitude queries to retrieve road speed limit data. These queries contain no identifying information.</li>
 </ul>
 
-<h2>Background Location</h2>
-<p>The App requests background location access so that the floating speed limit overlay can continue to update when the App is not in the foreground or the screen is locked. Background location data is used identically to foreground location data &mdash; only for speed limit lookups, never stored or shared.</p>
+<h2>Foreground Service Tracking</h2>
+<p>When you launch the floating speed limit bubble, the App runs an active Android Foreground Location Service with a visible ongoing notification so the overlay can continue updating while you use navigation apps or lock your screen. Location data is used only while the bubble is active for speed limit lookups, and is never stored or shared.</p>
 
 <h2>Data Collection</h2>
 <p>The App does <strong>not</strong> collect, store, or transmit any personal data. Specifically:</p>
@@ -46,24 +46,24 @@
     <li>No user accounts or sign-in</li>
     <li>No analytics or crash reporting</li>
     <li>No advertising or ad tracking</li>
-    <li>No cookies or local storage of personal information</li>
+    <li>No cookies or local storage of personal information (only local app preferences such as unit selection, sign style, alert allowance, and bubble screen position are saved on-device)</li>
     <li>No contact, camera, microphone, or file access</li>
 </ul>
 
 <h2>Third-Party Services</h2>
 <p>The App communicates with the following third-party service:</p>
 <ul>
-    <li><strong>OpenStreetMap Overpass API</strong> &mdash; Used to query road speed limit data. Queries contain only geographic coordinates (latitude and longitude) and no personally identifiable information. See the <a href="https://wiki.osmfoundation.org/wiki/Privacy_Policy">OpenStreetMap Foundation Privacy Policy</a>.</li>
+    <li><strong>OpenStreetMap Overpass API:</strong> Used to query road speed limit data. Queries contain only geographic coordinates (latitude and longitude) and no personally identifiable information. See the <a href="https://wiki.osmfoundation.org/wiki/Privacy_Policy">OpenStreetMap Foundation Privacy Policy</a>.</li>
 </ul>
 
 <h2>Permissions</h2>
 <p>The App requests the following Android permissions:</p>
 <ul>
-    <li><strong>Fine Location / Background Location</strong> &mdash; To determine which road you are on and display the speed limit.</li>
-    <li><strong>Display Over Other Apps</strong> &mdash; To show the floating speed limit bubble over other applications.</li>
-    <li><strong>Foreground Service</strong> &mdash; To keep the speed limit overlay running when the App is in the background.</li>
-    <li><strong>Internet</strong> &mdash; To query the Overpass API for speed limit data.</li>
-    <li><strong>Wake Lock</strong> &mdash; To keep GPS tracking active when the screen is off.</li>
+    <li><strong>Fine / Coarse Location:</strong> To determine which road you are on and display the speed limit while the overlay bubble is active.</li>
+    <li><strong>Display Over Other Apps:</strong> To show the floating speed limit bubble over other applications.</li>
+    <li><strong>Foreground Service (Location):</strong> To keep the speed limit overlay running when another app is in the foreground.</li>
+    <li><strong>Internet:</strong> To query the Overpass API for speed limit data.</li>
+    <li><strong>Wake Lock:</strong> To keep GPS tracking active when the screen is off.</li>
 </ul>
 
 <h2>Children's Privacy</h2>

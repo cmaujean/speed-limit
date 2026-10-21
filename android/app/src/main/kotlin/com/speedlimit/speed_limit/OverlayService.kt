@@ -1,16 +1,21 @@
 package com.speedlimit.speed_limit
 
+import android.Manifest
 import android.annotation.SuppressLint
 import android.app.Notification
 import android.app.NotificationChannel
 import android.app.NotificationManager
 import android.app.PendingIntent
 import android.app.Service
+import android.content.Context
 import android.content.Intent
+import android.content.pm.PackageManager
+import android.content.pm.ServiceInfo
 import android.graphics.Canvas
 import android.graphics.Color
 import android.graphics.Paint
 import android.graphics.PixelFormat
+import android.graphics.RectF
 import android.graphics.Typeface
 import android.graphics.drawable.Drawable
 import android.location.Location
@@ -19,35 +24,112 @@ import android.os.Handler
 import android.os.IBinder
 import android.os.Looper
 import android.os.PowerManager
+import android.provider.Settings
 import android.util.Log
 import android.util.TypedValue
 import android.view.Gravity
 import android.view.MotionEvent
 import android.view.WindowManager
 import android.widget.ImageView
-import com.google.android.gms.location.*
+import androidx.core.content.ContextCompat
+import com.google.android.gms.location.FusedLocationProviderClient
+import com.google.android.gms.location.LocationCallback
+import com.google.android.gms.location.LocationRequest
+import com.google.android.gms.location.LocationResult
+import com.google.android.gms.location.LocationServices
+import com.google.android.gms.location.Priority
 import java.io.BufferedReader
 import java.io.InputStreamReader
 import java.net.HttpURLConnection
 import java.net.URL
 import java.net.URLEncoder
 import kotlin.concurrent.thread
-import kotlin.math.*
+import kotlin.math.abs
+import kotlin.math.atan2
+import kotlin.math.cos
+import kotlin.math.roundToInt
+import kotlin.math.sin
+import kotlin.math.sqrt
 import org.json.JSONObject
-import org.json.JSONArray
 
 class OverlayService : Service() {
 
     companion object {
+        private const val PREFS_NAME = "speed_limit_prefs"
+        private const val KEY_ALLOWANCE = "over_limit_allowance"
+        private const val KEY_USE_METRIC = "use_metric"
+        private const val KEY_SIGN_STYLE = "sign_style"
+        private const val KEY_BUBBLE_X = "bubble_x"
+        private const val KEY_BUBBLE_Y = "bubble_y"
+
+        @Volatile
         var isRunning: Boolean = false
             private set
+
+        @Volatile
+        var currentSpeedLimitSnapshot: Int = 0
+            private set
+
+        fun getSavedAllowance(context: Context): Int {
+            val prefs = context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
+            return prefs.getInt(KEY_ALLOWANCE, 5).coerceIn(0, 50)
+        }
+
+        fun getSavedUseMetric(context: Context): Boolean {
+            val prefs = context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
+            return prefs.getBoolean(KEY_USE_METRIC, false)
+        }
+
+        fun getSavedSignStyle(context: Context): String {
+            val prefs = context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
+            val raw = prefs.getString(KEY_SIGN_STYLE, "circle") ?: "circle"
+            return if (raw == "us") "us" else "circle"
+        }
+
+        fun savePreferences(
+            context: Context,
+            overLimitAllowance: Int? = null,
+            useMetric: Boolean? = null,
+            signStyle: String? = null,
+            bubbleX: Int? = null,
+            bubbleY: Int? = null
+        ) {
+            val prefs = context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
+            prefs.edit().apply {
+                if (overLimitAllowance != null) putInt(KEY_ALLOWANCE, overLimitAllowance.coerceIn(0, 50))
+                if (useMetric != null) putBoolean(KEY_USE_METRIC, useMetric)
+                if (signStyle != null) putString(KEY_SIGN_STYLE, if (signStyle == "us") "us" else "circle")
+                if (bubbleX != null) putInt(KEY_BUBBLE_X, bubbleX)
+                if (bubbleY != null) putInt(KEY_BUBBLE_Y, bubbleY)
+                apply()
+            }
+        }
+
+        private fun hasLocationPermission(context: Context): Boolean {
+            val fine = ContextCompat.checkSelfPermission(
+                context,
+                Manifest.permission.ACCESS_FINE_LOCATION
+            ) == PackageManager.PERMISSION_GRANTED
+            val coarse = ContextCompat.checkSelfPermission(
+                context,
+                Manifest.permission.ACCESS_COARSE_LOCATION
+            ) == PackageManager.PERMISSION_GRANTED
+            return fine || coarse
+        }
     }
 
+    private val mainHandler = Handler(Looper.getMainLooper())
     private var windowManager: WindowManager? = null
     private var overlayView: ImageView? = null
+    private var overlayParams: WindowManager.LayoutParams? = null
+
     private var currentSpeedLimit: Int = 0
     private var currentSpeedMph: Float = 0f
+    private var currentSpeedKmh: Float = 0f
     private var overLimitAllowance: Int = 5
+    private var useMetric: Boolean = false
+    private var signStyle: String = "circle"
+
     private var isFlashingRed: Boolean = false
     private var flashHandler: Handler? = null
     private var flashRunnable: Runnable? = null
@@ -58,81 +140,181 @@ class OverlayService : Service() {
     private var locationCallback: LocationCallback? = null
     private var wakeLock: PowerManager.WakeLock? = null
 
-    // --- Road cache: bulk-fetched roads with geometry ---
+    // --- Road cache: bulk-fetched roads with geometry (accessed on mainHandler) ---
+    private enum class SpeedUnit { MPH, KMH, IMPLICIT }
+    private enum class Oneway { BIDIRECTIONAL, FORWARD, REVERSE }
+    private data class ParsedSpeed(val value: Int, val unit: SpeedUnit) {
+        fun toDisplayUnit(metric: Boolean): Int {
+            if (value <= 0) return 0
+            return if (metric) {
+                when (unit) {
+                    SpeedUnit.KMH, SpeedUnit.IMPLICIT -> value
+                    SpeedUnit.MPH -> maxOf(5, ((value * 1.60934) / 5.0).roundToInt() * 5)
+                }
+            } else {
+                when (unit) {
+                    SpeedUnit.MPH, SpeedUnit.IMPLICIT -> value
+                    SpeedUnit.KMH -> maxOf(5, ((value * 0.621371) / 5.0).roundToInt() * 5)
+                }
+            }
+        }
+    }
+
     private data class LatLon(val lat: Double, val lon: Double)
     private data class CachedRoad(
-        val speedLimit: Int,
-        val segments: List<Pair<LatLon, LatLon>>,  // line segments making up the road
-        val bearing: Double?  // overall bearing of the way, if computable
+        val parsedSpeed: ParsedSpeed,
+        val segments: List<Pair<LatLon, LatLon>>,
+        val oneway: Oneway
     )
 
     private var cachedRoads: List<CachedRoad> = emptyList()
+    private var hasValidCache: Boolean = false
     private var cacheCenterLat: Double = 0.0
     private var cacheCenterLon: Double = 0.0
-    private val CACHE_RADIUS_M = 500.0       // fetch roads within 500m
-    private val REFETCH_THRESHOLD_M = 150.0  // re-fetch when within 150m of edge
+    private val CACHE_RADIUS_M = 500.0
+    private val REFETCH_THRESHOLD_M = 150.0
     private var isFetching: Boolean = false
+    private var consecutiveFailures: Int = 0
+    private var nextAllowedFetchTimeMs: Long = 0L
+    private var consecutiveUnmatchedTicks: Int = 0
+    private var lastLocation: Location? = null
+    private var lastValidBearing: Double? = null
+
+    private val OVERPASS_ENDPOINTS = listOf(
+        "https://overpass-api.de/api/interpreter",
+        "https://overpass.kumi.systems/api/interpreter"
+    )
+    private val USER_AGENT = "SpeedLimit/1.1 (+https://github.com/cmaujean/speed-limit)"
 
     // Stall detection
     private var lastLocationTime: Long = 0
     private var stallCheckHandler: Handler? = null
     private var stallCheckRunnable: Runnable? = null
     private val STALL_TIMEOUT_MS = 10_000L
+    private val MIN_BEARING_SPEED_MPS = 1.5f
 
     override fun onBind(intent: Intent?): IBinder? = null
 
     override fun onCreate() {
         super.onCreate()
+        overLimitAllowance = getSavedAllowance(this)
+        useMetric = getSavedUseMetric(this)
+        signStyle = getSavedSignStyle(this)
+
+        if (!Settings.canDrawOverlays(this) || !hasLocationPermission(this)) {
+            Log.w("SpeedLimit", "Missing overlay or location permission on service start; stopping self")
+            isRunning = false
+            stopSelf()
+            return
+        }
+
         isRunning = true
         createNotificationChannel()
-        startForeground(NOTIFICATION_ID, buildNotification())
+        val notification = buildNotification()
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+            startForeground(
+                NOTIFICATION_ID,
+                notification,
+                ServiceInfo.FOREGROUND_SERVICE_TYPE_LOCATION
+            )
+        } else {
+            startForeground(NOTIFICATION_ID, notification)
+        }
         windowManager = getSystemService(WINDOW_SERVICE) as WindowManager
         acquireWakeLock()
     }
 
     @SuppressLint("ClickableViewAccessibility", "MissingPermission")
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
-        val speedLimit = intent?.getIntExtra("speedLimit", 0) ?: 0
-        currentSpeedLimit = speedLimit
-        overLimitAllowance = intent?.getIntExtra("overLimitAllowance", overLimitAllowance) ?: overLimitAllowance
+        if (!isRunning || !Settings.canDrawOverlays(this) || !hasLocationPermission(this)) {
+            stopSelf()
+            return START_NOT_STICKY
+        }
 
-        if (intent?.action == "UPDATE_ALLOWANCE") {
-            overLimitAllowance = intent.getIntExtra("overLimitAllowance", overLimitAllowance)
+        if (intent != null) {
+            if (intent.hasExtra("overLimitAllowance")) {
+                overLimitAllowance = intent.getIntExtra("overLimitAllowance", overLimitAllowance).coerceIn(0, 50)
+            }
+            if (intent.hasExtra("useMetric")) {
+                useMetric = intent.getBooleanExtra("useMetric", useMetric)
+            }
+            if (intent.hasExtra("signStyle")) {
+                val style = intent.getStringExtra("signStyle")
+                if (style != null) signStyle = if (style == "us") "us" else "circle"
+            }
+            savePreferences(
+                context = this,
+                overLimitAllowance = overLimitAllowance,
+                useMetric = useMetric,
+                signStyle = signStyle
+            )
+        } else {
+            overLimitAllowance = getSavedAllowance(this)
+            useMetric = getSavedUseMetric(this)
+            signStyle = getSavedSignStyle(this)
+        }
+
+        if (intent?.action == "UPDATE_ALLOWANCE" || intent?.action == "UPDATE_SETTINGS") {
+            recomputeCurrentLimitForUnit()
+            updateOverlayDimensionsIfNeeded()
             checkOverSpeed()
-            return START_STICKY
+            updateBubble()
+            updateNotification(currentSpeedLimit)
+            if (overlayView != null) {
+                return START_STICKY
+            }
         }
 
         if (intent?.action == "UPDATE") {
+            if (intent.hasExtra("speedLimit")) {
+                currentSpeedLimit = intent.getIntExtra("speedLimit", 0)
+                currentSpeedLimitSnapshot = currentSpeedLimit
+            }
+            checkOverSpeed()
             updateBubble()
-            return START_STICKY
+            if (overlayView != null) {
+                return START_STICKY
+            }
+        }
+
+        if (intent?.hasExtra("speedLimit") == true && overlayView == null) {
+            currentSpeedLimit = intent.getIntExtra("speedLimit", 0)
+            currentSpeedLimitSnapshot = currentSpeedLimit
         }
 
         if (overlayView != null) {
+            updateOverlayDimensionsIfNeeded()
+            checkOverSpeed()
             updateBubble()
             return START_STICKY
         }
 
-        val sizePx = dpToPx(64f).toInt()
+        val (widthPx, heightPx) = getBubbleSizePx()
+        val prefs = getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
+        val savedX = prefs.getInt(KEY_BUBBLE_X, -1)
+        val savedY = prefs.getInt(KEY_BUBBLE_Y, -1)
+        val defaultX = dpToPx(16f).toInt()
+        val defaultY = dpToPx(100f).toInt()
 
         val params = WindowManager.LayoutParams(
-            sizePx,
-            sizePx,
+            widthPx,
+            heightPx,
             if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O)
                 WindowManager.LayoutParams.TYPE_APPLICATION_OVERLAY
             else
                 @Suppress("DEPRECATION")
                 WindowManager.LayoutParams.TYPE_PHONE,
-            WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE or
-                    WindowManager.LayoutParams.FLAG_LAYOUT_NO_LIMITS,
+            WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE,
             PixelFormat.TRANSLUCENT
         ).apply {
             gravity = Gravity.TOP or Gravity.START
-            x = dpToPx(16f).toInt()
-            y = dpToPx(100f).toInt()
+            x = clampX(if (savedX >= 0) savedX else defaultX, widthPx)
+            y = clampY(if (savedY >= 0) savedY else defaultY, heightPx)
         }
+        overlayParams = params
 
         overlayView = ImageView(this).apply {
-            setImageDrawable(SpeedLimitDrawable(currentSpeedLimit))
+            setImageDrawable(SpeedLimitDrawable(currentSpeedLimit, alerting = false, style = signStyle))
         }
 
         var initialX = 0
@@ -155,13 +337,15 @@ class OverlayService : Service() {
                     val dx = event.rawX - initialTouchX
                     val dy = event.rawY - initialTouchY
                     if (dx * dx + dy * dy > 25) moved = true
-                    params.x = initialX + dx.toInt()
-                    params.y = initialY + dy.toInt()
+                    params.x = clampX(initialX + dx.toInt(), params.width)
+                    params.y = clampY(initialY + dy.toInt(), params.height)
                     windowManager?.updateViewLayout(overlayView, params)
                     true
                 }
                 MotionEvent.ACTION_UP -> {
-                    if (!moved) {
+                    if (moved) {
+                        savePreferences(this, bubbleX = params.x, bubbleY = params.y)
+                    } else {
                         val launchIntent = packageManager.getLaunchIntentForPackage(packageName)?.apply {
                             addFlags(Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_REORDER_TO_FRONT)
                         }
@@ -178,6 +362,40 @@ class OverlayService : Service() {
         startStallDetection()
 
         return START_STICKY
+    }
+
+    private fun getBubbleSizePx(): Pair<Int, Int> {
+        return if (signStyle == "us") {
+            Pair(dpToPx(64f).toInt(), dpToPx(80f).toInt())
+        } else {
+            val s = dpToPx(64f).toInt()
+            Pair(s, s)
+        }
+    }
+
+    private fun updateOverlayDimensionsIfNeeded() {
+        val view = overlayView ?: return
+        val params = overlayParams ?: return
+        val (w, h) = getBubbleSizePx()
+        if (params.width != w || params.height != h) {
+            params.width = w
+            params.height = h
+            params.x = clampX(params.x, w)
+            params.y = clampY(params.y, h)
+            windowManager?.updateViewLayout(view, params)
+        }
+    }
+
+    private fun clampX(x: Int, widthPx: Int): Int {
+        val screenW = resources.displayMetrics.widthPixels
+        val maxX = maxOf(0, screenW - widthPx)
+        return x.coerceIn(0, maxX)
+    }
+
+    private fun clampY(y: Int, heightPx: Int): Int {
+        val screenH = resources.displayMetrics.heightPixels
+        val maxY = maxOf(0, screenH - heightPx)
+        return y.coerceIn(0, maxY)
     }
 
     @SuppressLint("WakelockTimeout")
@@ -221,6 +439,7 @@ class OverlayService : Service() {
     }
 
     private fun startStallDetection() {
+        stopStallDetection()
         stallCheckHandler = Handler(Looper.getMainLooper())
         stallCheckRunnable = object : Runnable {
             @SuppressLint("MissingPermission")
@@ -242,62 +461,109 @@ class OverlayService : Service() {
         stallCheckRunnable = null
     }
 
-    // ---- Core location handler ----
+    private fun recomputeCurrentLimitForUnit() {
+        val loc = lastLocation ?: return
+        if (!hasValidCache) return
+        val matched = matchNearestRoad(loc.latitude, loc.longitude, lastValidBearing)
+        if (matched != null) {
+            currentSpeedLimit = matched
+            currentSpeedLimitSnapshot = matched
+        }
+    }
+
+    // ---- Core location handler (runs on main looper) ----
 
     private fun onNewLocation(location: Location) {
+        lastLocation = location
         val lat = location.latitude
         val lon = location.longitude
-        val bearing = if (location.hasBearing()) location.bearing.toDouble() else null
+        if (location.hasBearing() && location.speed >= MIN_BEARING_SPEED_MPS) {
+            lastValidBearing = location.bearing.toDouble()
+        }
+        val bearing = lastValidBearing
 
-        // Update speed on every GPS tick
         currentSpeedMph = location.speed * 2.23694f
+        currentSpeedKmh = location.speed * 3.6f
         checkOverSpeed()
 
-        // Local match against cached roads (instant, no network)
-        if (cachedRoads.isNotEmpty()) {
+        if (hasValidCache) {
             val matched = matchNearestRoad(lat, lon, bearing)
-            if (matched != null && matched != currentSpeedLimit) {
-                currentSpeedLimit = matched
-                checkOverSpeed()
-                updateBubble()
-                updateNotification(matched)
+            if (matched != null) {
+                consecutiveUnmatchedTicks = 0
+                if (matched != currentSpeedLimit) {
+                    currentSpeedLimit = matched
+                    currentSpeedLimitSnapshot = matched
+                    checkOverSpeed()
+                    updateBubble()
+                    updateNotification(matched)
+                }
+            } else {
+                consecutiveUnmatchedTicks++
+                if (consecutiveUnmatchedTicks >= 3 && currentSpeedLimit != 0) {
+                    currentSpeedLimit = 0
+                    currentSpeedLimitSnapshot = 0
+                    checkOverSpeed()
+                    updateBubble()
+                    updateNotification(0)
+                }
             }
         }
 
-        // Check if we need to re-fetch: either no cache yet, or approaching edge
-        val distFromCenter = distanceMeters(lat, lon, cacheCenterLat, cacheCenterLon)
-        val needRefetch = cachedRoads.isEmpty() || distFromCenter > (CACHE_RADIUS_M - REFETCH_THRESHOLD_M)
+        val distFromCenter = if (hasValidCache) {
+            distanceMeters(lat, lon, cacheCenterLat, cacheCenterLon)
+        } else {
+            Double.MAX_VALUE
+        }
+        val needRefetch = !hasValidCache || distFromCenter > (CACHE_RADIUS_M - REFETCH_THRESHOLD_M)
+        val now = System.currentTimeMillis()
 
-        if (needRefetch && !isFetching) {
+        if (needRefetch && !isFetching && now >= nextAllowedFetchTimeMs) {
             isFetching = true
             val fetchLat = lat
             val fetchLon = lon
             thread {
                 val roads = fetchRoadsInRadius(fetchLat, fetchLon, CACHE_RADIUS_M)
-                if (roads != null) {
-                    cachedRoads = roads
-                    cacheCenterLat = fetchLat
-                    cacheCenterLon = fetchLon
-                    Log.i("SpeedLimit", "Cached ${roads.size} roads around ($fetchLat, $fetchLon)")
+                mainHandler.post {
+                    isFetching = false
+                    if (!isRunning) return@post
 
-                    // Re-match immediately with fresh data
-                    val matched = matchNearestRoad(lat, lon, bearing)
-                    val newLimit = matched ?: 0
-                    if (newLimit != currentSpeedLimit) {
-                        currentSpeedLimit = newLimit
-                        Handler(Looper.getMainLooper()).post {
+                    if (roads != null) {
+                        cachedRoads = roads
+                        hasValidCache = true
+                        cacheCenterLat = fetchLat
+                        cacheCenterLon = fetchLon
+                        consecutiveFailures = 0
+                        nextAllowedFetchTimeMs = 0L
+                        Log.i("SpeedLimit", "Cached ${roads.size} roads around ($fetchLat, $fetchLon)")
+
+                        val latestLoc = lastLocation
+                        val matchLat = latestLoc?.latitude ?: fetchLat
+                        val matchLon = latestLoc?.longitude ?: fetchLon
+                        val matched = matchNearestRoad(matchLat, matchLon, lastValidBearing)
+                        val newLimit = matched ?: 0
+                        if (matched != null) {
+                            consecutiveUnmatchedTicks = 0
+                        }
+                        if (newLimit != currentSpeedLimit) {
+                            currentSpeedLimit = newLimit
+                            currentSpeedLimitSnapshot = newLimit
                             checkOverSpeed()
                             updateBubble()
-                            if (newLimit > 0) updateNotification(newLimit)
+                            updateNotification(newLimit)
                         }
+                    } else {
+                        consecutiveFailures++
+                        val shift = minOf(consecutiveFailures - 1, 4)
+                        val backoffMs = minOf(60_000L, 5_000L * (1L shl shift))
+                        nextAllowedFetchTimeMs = System.currentTimeMillis() + backoffMs
+                        Log.w("SpeedLimit", "Overpass fetch failed; backing off for ${backoffMs}ms")
                     }
                 }
-                isFetching = false
             }
         }
     }
 
-    // ---- Local road matching (no network) ----
+    // ---- Local road matching (no network, runs on main looper) ----
 
     private fun matchNearestRoad(lat: Double, lon: Double, bearingDeg: Double?): Int? {
         if (cachedRoads.isEmpty()) return null
@@ -316,34 +582,36 @@ class OverlayService : Service() {
                     closestSegBearing = bearing(a.lat, a.lon, b.lat, b.lon)
                 }
             }
-            if (minDist < 50.0) { // only consider roads within 50m
+            if (minDist < 50.0) {
                 candidates.add(Candidate(road, minDist, closestSegBearing))
             }
         }
 
         if (candidates.isEmpty()) return null
 
-        // If we have a GPS bearing, score candidates by distance + bearing match
         if (bearingDeg != null) {
             val scored = candidates.map { c ->
                 val bearingPenalty = if (c.segBearing != null) {
-                    // Angle difference 0-180, normalized to 0-1
-                    // Roads are bidirectional, so use min of forward and reverse
-                    val diff = angleDiff(bearingDeg, c.segBearing)
-                    val reverseDiff = angleDiff(bearingDeg, (c.segBearing + 180) % 360)
-                    minOf(diff, reverseDiff) / 180.0
+                    val diff = when (c.road.oneway) {
+                        Oneway.FORWARD -> angleDiff(bearingDeg, c.segBearing)
+                        Oneway.REVERSE -> angleDiff(bearingDeg, (c.segBearing + 180.0) % 360.0)
+                        Oneway.BIDIRECTIONAL -> {
+                            val forwardDiff = angleDiff(bearingDeg, c.segBearing)
+                            val reverseDiff = angleDiff(bearingDeg, (c.segBearing + 180.0) % 360.0)
+                            minOf(forwardDiff, reverseDiff)
+                        }
+                    }
+                    diff / 180.0
                 } else 0.0
-                // Combined score: distance (meters) + bearing penalty * 30m weight
                 val score = c.distance + bearingPenalty * 30.0
                 Pair(c, score)
             }
             val best = scored.minByOrNull { it.second }
-            return best?.first?.road?.speedLimit
+            return best?.first?.road?.parsedSpeed?.toDisplayUnit(useMetric)
         }
 
-        // No bearing: just pick closest
         val closest = candidates.minByOrNull { it.distance }
-        return closest?.road?.speedLimit
+        return closest?.road?.parsedSpeed?.toDisplayUnit(useMetric)
     }
 
     // ---- Geometry utilities ----
@@ -354,13 +622,11 @@ class OverlayService : Service() {
         return results[0].toDouble()
     }
 
-    /** Distance in meters from point (plat, plon) to line segment (a -> b) */
     private fun pointToSegmentDistance(
         plat: Double, plon: Double,
         alat: Double, alon: Double,
         blat: Double, blon: Double
     ): Double {
-        // Project onto segment in local meter space
         val ax = (alon - plon) * cos(Math.toRadians(plat)) * 111320
         val ay = (alat - plat) * 110540
         val bx = (blon - plon) * cos(Math.toRadians(plat)) * 111320
@@ -370,7 +636,6 @@ class OverlayService : Service() {
         val dy = by - ay
         val lenSq = dx * dx + dy * dy
         if (lenSq < 0.001) {
-            // Degenerate segment
             return sqrt(ax * ax + ay * ay)
         }
 
@@ -381,7 +646,6 @@ class OverlayService : Service() {
         return sqrt(projX * projX + projY * projY)
     }
 
-    /** Bearing in degrees from point a to point b */
     private fun bearing(lat1: Double, lon1: Double, lat2: Double, lon2: Double): Double {
         val dLon = Math.toRadians(lon2 - lon1)
         val y = sin(dLon) * cos(Math.toRadians(lat2))
@@ -390,85 +654,115 @@ class OverlayService : Service() {
         return (Math.toDegrees(atan2(y, x)) + 360) % 360
     }
 
-    /** Absolute angle difference in degrees (0-180) */
     private fun angleDiff(a: Double, b: Double): Double {
         val d = abs(a - b) % 360
         return if (d > 180) 360 - d else d
     }
 
-    // ---- Overpass API: bulk fetch with geometry ----
+    // ---- Overpass API: bulk fetch with geometry & mirror fallback ----
 
     private fun fetchRoadsInRadius(lat: Double, lon: Double, radiusM: Double): List<CachedRoad>? {
-        try {
-            val query = "[out:json][timeout:10];way(around:${radiusM.toInt()},$lat,$lon)[\"highway\"][\"maxspeed\"];out body geom;"
-            val url = URL("https://overpass-api.de/api/interpreter")
-            val conn = url.openConnection() as HttpURLConnection
-            conn.requestMethod = "POST"
-            conn.doOutput = true
-            conn.connectTimeout = 10000
-            conn.readTimeout = 10000
-            conn.setRequestProperty("Content-Type", "application/x-www-form-urlencoded")
+        val query = "[out:json][timeout:10];way(around:${radiusM.toInt()},$lat,$lon)[\"highway\"][\"maxspeed\"];out body geom;"
+        val postData = "data=${URLEncoder.encode(query, "UTF-8")}".toByteArray()
 
-            val postData = "data=${URLEncoder.encode(query, "UTF-8")}"
-            conn.outputStream.use { it.write(postData.toByteArray()) }
+        for (endpoint in OVERPASS_ENDPOINTS) {
+            var conn: HttpURLConnection? = null
+            try {
+                val url = URL(endpoint)
+                conn = (url.openConnection() as HttpURLConnection).apply {
+                    requestMethod = "POST"
+                    doOutput = true
+                    connectTimeout = 10_000
+                    readTimeout = 10_000
+                    setRequestProperty("Content-Type", "application/x-www-form-urlencoded")
+                    setRequestProperty("User-Agent", USER_AGENT)
+                }
 
-            if (conn.responseCode != 200) {
+                conn.outputStream.use { it.write(postData) }
+
+                if (conn.responseCode != 200) {
+                    Log.w("SpeedLimit", "Overpass endpoint $endpoint returned HTTP ${conn.responseCode}")
+                    conn.disconnect()
+                    continue
+                }
+
+                val body = BufferedReader(InputStreamReader(conn.inputStream)).use { it.readText() }
                 conn.disconnect()
-                return null
-            }
 
-            val body = BufferedReader(InputStreamReader(conn.inputStream)).use { it.readText() }
-            conn.disconnect()
+                val json = JSONObject(body)
+                val elements = json.getJSONArray("elements")
+                val roads = mutableListOf<CachedRoad>()
 
-            val json = JSONObject(body)
-            val elements = json.getJSONArray("elements")
-            val roads = mutableListOf<CachedRoad>()
+                for (i in 0 until elements.length()) {
+                    val el = elements.getJSONObject(i)
+                    val tags = el.optJSONObject("tags") ?: continue
+                    val maxspeed = tags.optString("maxspeed", "")
+                    if (maxspeed.isEmpty()) continue
+                    val parsedSpeed = parseSpeedLimit(maxspeed) ?: continue
+                    val oneway = parseOneway(tags.optString("oneway", ""))
 
-            for (i in 0 until elements.length()) {
-                val el = elements.getJSONObject(i)
-                val tags = el.optJSONObject("tags") ?: continue
-                val maxspeed = tags.optString("maxspeed", "")
-                if (maxspeed.isEmpty()) continue
-                val limit = parseSpeedLimit(maxspeed) ?: continue
-
-                val geometry = el.optJSONArray("geometry") ?: continue
-                val segments = mutableListOf<Pair<LatLon, LatLon>>()
-                for (j in 0 until geometry.length() - 1) {
-                    val p1 = geometry.getJSONObject(j)
-                    val p2 = geometry.getJSONObject(j + 1)
-                    segments.add(
-                        Pair(
-                            LatLon(p1.getDouble("lat"), p1.getDouble("lon")),
-                            LatLon(p2.getDouble("lat"), p2.getDouble("lon"))
+                    val geometry = el.optJSONArray("geometry") ?: continue
+                    val segments = mutableListOf<Pair<LatLon, LatLon>>()
+                    for (j in 0 until geometry.length() - 1) {
+                        val p1 = geometry.getJSONObject(j)
+                        val p2 = geometry.getJSONObject(j + 1)
+                        segments.add(
+                            Pair(
+                                LatLon(p1.getDouble("lat"), p1.getDouble("lon")),
+                                LatLon(p2.getDouble("lat"), p2.getDouble("lon"))
+                            )
                         )
-                    )
-                }
+                    }
 
-                if (segments.isNotEmpty()) {
-                    val first = segments.first().first
-                    val last = segments.last().second
-                    val roadBearing = bearing(first.lat, first.lon, last.lat, last.lon)
-                    roads.add(CachedRoad(limit, segments, roadBearing))
+                    if (segments.isNotEmpty()) {
+                        roads.add(CachedRoad(parsedSpeed, segments, oneway))
+                    }
                 }
+                return roads
+            } catch (e: Exception) {
+                Log.w("SpeedLimit", "Failed to fetch roads from $endpoint", e)
+                conn?.disconnect()
             }
-            return roads
-        } catch (e: Exception) {
-            Log.w("SpeedLimit", "Failed to fetch roads", e)
-            return null
         }
+        return null
     }
 
-    private fun parseSpeedLimit(raw: String): Int? {
+    private fun parseSpeedLimit(raw: String): ParsedSpeed? {
         val trimmed = raw.trim().lowercase()
-        if (trimmed in listOf("none", "signals", "walk")) return null
-        val match = Regex("(\\d+)").find(trimmed)
-        return match?.groupValues?.get(1)?.toIntOrNull()
+        if (trimmed in listOf("none", "signals", "walk", "variable")) return null
+        val match = Regex("(\\d+)").find(trimmed) ?: return null
+        val value = match.groupValues[1].toIntOrNull() ?: return null
+        if (value <= 0) return null
+
+        val unit = when {
+            trimmed.contains("mph") -> SpeedUnit.MPH
+            trimmed.contains("km/h") || trimmed.contains("kph") || trimmed.contains("kmh") -> SpeedUnit.KMH
+            else -> SpeedUnit.IMPLICIT
+        }
+        return ParsedSpeed(value, unit)
+    }
+
+    private fun parseOneway(raw: String): Oneway {
+        return when (raw.trim().lowercase()) {
+            "yes", "true", "1" -> Oneway.FORWARD
+            "-1", "reverse" -> Oneway.REVERSE
+            else -> Oneway.BIDIRECTIONAL
+        }
     }
 
     // ---- Speed alert ----
 
+    private fun currentSpeedInSelectedUnit(): Float {
+        return if (useMetric) currentSpeedKmh else currentSpeedMph
+    }
+
+    private fun unitLabel(): String {
+        return if (useMetric) "km/h" else "mph"
+    }
+
     private fun checkOverSpeed() {
-        val isOver = currentSpeedLimit > 0 && currentSpeedMph > currentSpeedLimit + overLimitAllowance
+        val speed = currentSpeedInSelectedUnit()
+        val isOver = currentSpeedLimit > 0 && speed > currentSpeedLimit + overLimitAllowance
         if (isOver && !isFlashingRed) {
             startFlashing()
         } else if (!isOver && isFlashingRed) {
@@ -482,7 +776,9 @@ class OverlayService : Service() {
         var showRed = true
         flashRunnable = object : Runnable {
             override fun run() {
-                overlayView?.setImageDrawable(SpeedLimitDrawable(currentSpeedLimit, alerting = showRed))
+                overlayView?.setImageDrawable(
+                    SpeedLimitDrawable(currentSpeedLimit, alerting = showRed, style = signStyle)
+                )
                 overlayView?.invalidate()
                 showRed = !showRed
                 flashHandler?.postDelayed(this, 500)
@@ -503,7 +799,9 @@ class OverlayService : Service() {
 
     private fun updateBubble() {
         if (!isFlashingRed) {
-            overlayView?.setImageDrawable(SpeedLimitDrawable(currentSpeedLimit, alerting = false))
+            overlayView?.setImageDrawable(
+                SpeedLimitDrawable(currentSpeedLimit, alerting = false, style = signStyle)
+            )
             overlayView?.invalidate()
         }
     }
@@ -515,10 +813,15 @@ class OverlayService : Service() {
             this, 0, launchIntent,
             PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE
         )
+        val title = if (speedLimit > 0) {
+            "Speed Limit: $speedLimit ${unitLabel()}"
+        } else {
+            "Speed Limit: --"
+        }
 
         val notification = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
             Notification.Builder(this, CHANNEL_ID)
-                .setContentTitle("Speed Limit: $speedLimit mph")
+                .setContentTitle(title)
                 .setContentText("Tracking active")
                 .setSmallIcon(android.R.drawable.ic_menu_mylocation)
                 .setContentIntent(pendingIntent)
@@ -527,7 +830,7 @@ class OverlayService : Service() {
         } else {
             @Suppress("DEPRECATION")
             Notification.Builder(this)
-                .setContentTitle("Speed Limit: $speedLimit mph")
+                .setContentTitle(title)
                 .setContentText("Tracking active")
                 .setSmallIcon(android.R.drawable.ic_menu_mylocation)
                 .setContentIntent(pendingIntent)
@@ -540,12 +843,20 @@ class OverlayService : Service() {
     override fun onDestroy() {
         super.onDestroy()
         isRunning = false
+        currentSpeedLimitSnapshot = 0
+        mainHandler.removeCallbacksAndMessages(null)
         stopFlashing()
         stopStallDetection()
         stopLocationUpdates()
         fusedLocationClient = null
-        overlayView?.let { windowManager?.removeView(it) }
+        overlayView?.let {
+            try {
+                windowManager?.removeView(it)
+            } catch (_: Exception) {
+            }
+        }
         overlayView = null
+        overlayParams = null
         wakeLock?.let { if (it.isHeld) it.release() }
         wakeLock = null
     }
@@ -598,7 +909,11 @@ class OverlayService : Service() {
         )
     }
 
-    inner class SpeedLimitDrawable(private val speedLimit: Int, private val alerting: Boolean = false) : Drawable() {
+    inner class SpeedLimitDrawable(
+        private val speedLimit: Int,
+        private val alerting: Boolean = false,
+        private val style: String = "circle"
+    ) : Drawable() {
         private val whitePaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
             color = Color.WHITE
             style = Paint.Style.FILL
@@ -607,6 +922,16 @@ class OverlayService : Service() {
             color = Color.parseColor("#D32F2F")
             style = Paint.Style.STROKE
             strokeWidth = 8f
+        }
+        private val blackBorderPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+            color = Color.parseColor("#111111")
+            style = Paint.Style.STROKE
+            strokeWidth = 5f
+        }
+        private val whiteBorderPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+            color = Color.WHITE
+            style = Paint.Style.STROKE
+            strokeWidth = 5f
         }
         private val shadowPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
             color = Color.parseColor("#33000000")
@@ -617,12 +942,16 @@ class OverlayService : Service() {
             textAlign = Paint.Align.CENTER
             typeface = Typeface.DEFAULT_BOLD
         }
+        private val headerPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+            color = Color.BLACK
+            textAlign = Paint.Align.CENTER
+            typeface = Typeface.DEFAULT_BOLD
+        }
         private val unknownPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
             color = Color.parseColor("#757575")
             textAlign = Paint.Align.CENTER
             typeface = Typeface.DEFAULT_BOLD
         }
-
         private val alertFillPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
             color = Color.parseColor("#D32F2F")
             style = Paint.Style.FILL
@@ -634,35 +963,81 @@ class OverlayService : Service() {
         }
 
         override fun draw(canvas: Canvas) {
+            if (style == "us") {
+                drawUsSign(canvas)
+            } else {
+                drawCircleSign(canvas)
+            }
+        }
+
+        private fun drawCircleSign(canvas: Canvas) {
             val cx = bounds.exactCenterX()
             val cy = bounds.exactCenterY()
-            val radius = Math.min(bounds.width(), bounds.height()) / 2f - 6f
+            val radius = minOf(bounds.width(), bounds.height()) / 2f - 6f
+            val displayText = if (speedLimit > 0) speedLimit.toString() else "--"
 
             canvas.drawCircle(cx + 2f, cy + 2f, radius, shadowPaint)
 
             if (alerting) {
                 canvas.drawCircle(cx, cy, radius, alertFillPaint)
-                if (speedLimit > 0) {
-                    val text = speedLimit.toString()
-                    alertTextPaint.textSize = radius * (if (text.length <= 2) 1.0f else 0.75f)
-                    val textY = cy - (alertTextPaint.descent() + alertTextPaint.ascent()) / 2
-                    canvas.drawText(text, cx, textY, alertTextPaint)
-                }
+                alertTextPaint.textSize = radius * (if (displayText.length <= 2) 1.0f else 0.75f)
+                val textY = cy - (alertTextPaint.descent() + alertTextPaint.ascent()) / 2
+                canvas.drawText(displayText, cx, textY, alertTextPaint)
             } else {
                 canvas.drawCircle(cx, cy, radius, whitePaint)
-                redPaint.strokeWidth = radius * 0.12f
+                redPaint.strokeWidth = radius * 0.14f
                 canvas.drawCircle(cx, cy, radius - redPaint.strokeWidth / 2, redPaint)
 
-                if (speedLimit > 0) {
-                    val text = speedLimit.toString()
-                    textPaint.textSize = radius * (if (text.length <= 2) 1.0f else 0.75f)
-                    val textY = cy - (textPaint.descent() + textPaint.ascent()) / 2
-                    canvas.drawText(text, cx, textY, textPaint)
-                } else {
-                    unknownPaint.textSize = radius * 0.9f
-                    val textY = cy - (unknownPaint.descent() + unknownPaint.ascent()) / 2
-                    canvas.drawText("--", cx, textY, unknownPaint)
-                }
+                val activePaint = if (speedLimit > 0) textPaint else unknownPaint
+                activePaint.textSize = radius * (if (displayText.length <= 2) 0.95f else 0.75f)
+                val textY = cy - (activePaint.descent() + activePaint.ascent()) / 2
+                canvas.drawText(displayText, cx, textY, activePaint)
+            }
+        }
+
+        private fun drawUsSign(canvas: Canvas) {
+            val pad = 4f
+            val w = bounds.width().toFloat()
+            val h = bounds.height().toFloat()
+            val rect = RectF(pad, pad, w - pad, h - pad)
+            val shadowRect = RectF(pad + 2f, pad + 2f, w - pad + 2f, h - pad + 2f)
+            val corner = minOf(w, h) * 0.14f
+            val cx = bounds.exactCenterX()
+            val displayText = if (speedLimit > 0) speedLimit.toString() else "--"
+
+            canvas.drawRoundRect(shadowRect, corner, corner, shadowPaint)
+
+            if (alerting) {
+                canvas.drawRoundRect(rect, corner, corner, alertFillPaint)
+                whiteBorderPaint.strokeWidth = minOf(w, h) * 0.05f
+                val inset = whiteBorderPaint.strokeWidth
+                val innerRect = RectF(rect.left + inset, rect.top + inset, rect.right - inset, rect.bottom - inset)
+                canvas.drawRoundRect(innerRect, corner * 0.75f, corner * 0.75f, whiteBorderPaint)
+
+                alertTextPaint.textSize = w * 0.16f
+                canvas.drawText("SPEED", cx, rect.top + h * 0.23f, alertTextPaint)
+                canvas.drawText("LIMIT", cx, rect.top + h * 0.37f, alertTextPaint)
+
+                alertTextPaint.textSize = w * (if (displayText.length <= 2) 0.44f else 0.34f)
+                val numCenterY = rect.top + h * 0.68f
+                val textY = numCenterY - (alertTextPaint.descent() + alertTextPaint.ascent()) / 2
+                canvas.drawText(displayText, cx, textY, alertTextPaint)
+            } else {
+                canvas.drawRoundRect(rect, corner, corner, whitePaint)
+                blackBorderPaint.strokeWidth = minOf(w, h) * 0.05f
+                val inset = blackBorderPaint.strokeWidth
+                val innerRect = RectF(rect.left + inset, rect.top + inset, rect.right - inset, rect.bottom - inset)
+                canvas.drawRoundRect(innerRect, corner * 0.75f, corner * 0.75f, blackBorderPaint)
+
+                headerPaint.textSize = w * 0.16f
+                canvas.drawText("SPEED", cx, rect.top + h * 0.23f, headerPaint)
+                canvas.drawText("LIMIT", cx, rect.top + h * 0.37f, headerPaint)
+
+                val activePaint = if (speedLimit > 0) textPaint else unknownPaint
+                activePaint.textSize = w * (if (displayText.length <= 2) 0.44f else 0.34f)
+                val numCenterY = rect.top + h * 0.68f
+                val textY = numCenterY - (activePaint.descent() + activePaint.ascent()) / 2
+                canvas.drawText(displayText, cx, textY, activePaint)
             }
         }
 
